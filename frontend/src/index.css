@@ -1,0 +1,54 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { font-family: "DM Sans", ui-sans-serif, system-ui, sans-serif; color: #202631; background: #fff; font-synthesis: none; text-rendering: optimizeLegibility; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 360px; min-height: 100vh; }
+button, input, textarea { font: inherit; }
+button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid #8CA3C8; outline-offset: 2px; }
+.icon-button { display:inline-grid; width:30px; height:30px; place-items:center; border-radius:8px; color:#8490A0; transition:background .15s,color .15s; }
+.icon-button:hover { background:#EDF0F4; color:#39485F; }
+.nav-button { display:flex; width:100%; align-items:center; gap:10px; border-radius:9px; padding:10px 11px; text-align:left; font-size:12px; color:#667181; transition:all .15s; }
+.nav-button:hover { background:#EEF1F5; color:#354154; }
+.nav-active { background:#E8EDF5; color:#354D72; font-weight:600; }
+.primary-button { display:inline-flex; align-items:center; justify-content:center; gap:8px; border-radius:9px; background:#344C73; padding:9px 13px; color:#fff; font-size:12px; font-weight:600; transition:background .15s; }
+.primary-button:hover { background:#293E60; }
+.primary-button:disabled { opacity:.5; cursor:not-allowed; }
+.eyebrow { font-size:10px; font-weight:700; letter-spacing:.15em; color:#8792A2; }
+.page-title { margin-top:7px; font-family:Manrope,sans-serif; font-size:27px; font-weight:800; letter-spacing:-.045em; color:#252D3A; }
+.section-title { font-size:14px; font-weight:700; color:#303B4B; }
+.tab-button { border-bottom:2px solid transparent; padding:9px 12px; font-size:12px; color:#7A8492; }
+.tab-button:hover { color:#39485F; }
+.tab-active { border-color:#4969A5; color:#354D72; font-weight:700; }
+.form-label { display:block; margin-bottom:7px; font-size:11px; font-weight:600; color:#596475; }
+.form-input { display:block; width:100%; border:1px solid #E0E4EB; border-radius:9px; background:#fff; padding:10px 11px; font-size:12px; color:#303A49; outline:none; }
+.form-input:focus { border-color:#9AAECD; box-shadow:0 0 0 3px rgba(73,105,165,.08); }
+.markdown-body { font-size:14px; line-height:1.8; overflow-wrap:anywhere; }
+.markdown-body p { margin:0 0 12px; }
+.markdown-body h1,.markdown-body h2,.markdown-body h3 { margin:18px 0 8px; font-family:Manrope,sans-serif; font-weight:700; color:#263142; }
+.markdown-body h1 { font-size:21px; }.markdown-body h2 { font-size:18px; }.markdown-body h3 { font-size:15px; }
+.markdown-body ul,.markdown-body ol { margin:8px 0 14px; padding-left:23px; }
+.markdown-body li { margin:4px 0; }
+.markdown-body a { color:#42669E; text-decoration:underline; }
+.markdown-body blockquote { margin:12px 0; border-left:3px solid #C9D4E4; padding:5px 12px; color:#697486; }
+.markdown-body pre { overflow-x:auto; margin:12px 0; border:1px solid #252E3B; border-radius:10px; background:#1D2531; padding:15px; color:#E6EAF0; font-size:12px; line-height:1.7; }
+.markdown-body code { border-radius:4px; background:#F0F2F5; padding:2px 5px; font-family:Consolas,monospace; font-size:.88em; }
+.markdown-body pre code { background:transparent; padding:0; color:inherit; }
+.markdown-body table { display:block; width:100%; overflow-x:auto; border-collapse:collapse; margin:12px 0; font-size:12px; }
+.markdown-body th,.markdown-body td { border:1px solid #E3E7ED; padding:8px 10px; text-align:left; }
+.markdown-body th { background:#F4F6F8; font-weight:700; }
+.typing-dot { height:6px;width:6px;border-radius:50%;background:#8394AE;box-shadow:10px 0 #B1BDCD,20px 0 #D0D7E0; margin-right:16px; animation:pulse 1s infinite alternate; }
+@keyframes pulse { from{opacity:.4}to{opacity:1} }
+@media (max-width: 760px) {
+  body { min-width:320px; }
+  aside { width:70px !important; }
+  aside .font-display, aside .text-\[11px\], aside .text-\[10px\], aside .nav-button span, aside input, aside .group span { display:none; }\n  aside .nav-button { justify-content:center; padding-left:0; padding-right:0; }
+  aside .px-5 { justify-content:center; padding-left:0;padding-right:0; }
+  aside .px-3 button { font-size:0; }
+  aside .px-3 button svg { flex-shrink:0; }
+  .page-title { font-size:23px; }
+}
+
+.secondary-button { display:inline-flex; align-items:center; justify-content:center; gap:7px; border:1px solid #E0E4EB; border-radius:9px; background:#fff; padding:8px 12px; color:#596475; font-size:12px; font-weight:600; transition:all .15s; }
+.secondary-button:hover { background:#F6F8FA; border-color:#C9D2DF; }

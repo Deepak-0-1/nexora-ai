@@ -1,0 +1,281 @@
+import json
+import uuid
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from backend.config import CORS_ORIGINS
+from backend.db import connect, init_db
+from backend.ollama_client import stream_chat, check_ollama, OllamaError
+from backend.context import build_messages, runtime_settings
+from backend.jobs import enqueue_job, start_worker, stop_worker
+from backend.memory import (
+    create_memory, update_memory, approve_memory, archive_memory,
+    delete_memory, list_memories, get_memory_history
+)
+from backend.schemas import (
+    ChatRequest, ConversationCreate, MemoryCreate, MemoryUpdate,
+    ProfileUpdate, SettingsUpdate
+)
+
+app = FastAPI(title="Personal AI Assistant API", version="2.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.on_event("startup")
+def startup():
+    init_db()
+    start_worker()
+
+@app.on_event("shutdown")
+def shutdown():
+    stop_worker()
+
+@app.get("/health")
+def health():
+    try:
+        check_ollama()
+        ollama = "connected"
+    except OllamaError as exc:
+        ollama = str(exc)
+    with connect() as c:
+        pending = c.execute("SELECT COUNT(*) FROM memory_jobs WHERE status='pending'").fetchone()[0]
+    return {"status": "ok" if ollama == "connected" else "degraded",
+            "ollama": ollama, "pending_background_jobs": pending}
+
+@app.get("/api/conversations")
+def conversations(search: str | None = Query(default=None, max_length=200)):
+    with connect() as c:
+        if search:
+            rows = c.execute(
+                """SELECT DISTINCT c.id,c.title,c.created_at,c.updated_at
+                   FROM conversations c LEFT JOIN messages m ON m.conversation_id=c.id
+                   WHERE c.title LIKE ? OR m.content LIKE ?
+                   ORDER BY c.updated_at DESC LIMIT 100""",
+                (f"%{search}%", f"%{search}%")
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT id,title,created_at,updated_at FROM conversations ORDER BY updated_at DESC LIMIT 100"
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+@app.post("/api/conversations")
+def create_conversation(body: ConversationCreate):
+    cid = str(uuid.uuid4())
+    with connect() as c:
+        c.execute("INSERT INTO conversations(id,title) VALUES(?,?)",
+                  (cid, body.title.strip() or "New chat"))
+    return {"id": cid, "title": body.title.strip() or "New chat"}
+
+@app.delete("/api/conversations/{conversation_id}")
+def delete_conversation(conversation_id: str):
+    with connect() as c:
+        cur = c.execute("DELETE FROM conversations WHERE id=?", (conversation_id,))
+        if not cur.rowcount:
+            raise HTTPException(404, "Conversation not found")
+    return {"deleted": True}
+
+@app.get("/api/conversations/{conversation_id}/messages")
+def get_messages(conversation_id: str):
+    with connect() as c:
+        if not c.execute("SELECT 1 FROM conversations WHERE id=?", (conversation_id,)).fetchone():
+            raise HTTPException(404, "Conversation not found")
+        rows = c.execute(
+            "SELECT id,role,content,created_at FROM messages WHERE conversation_id=? ORDER BY id",
+            (conversation_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+@app.patch("/api/messages/{message_id}")
+def edit_message(message_id: int, body: dict):
+    content = str(body.get("content", "")).strip()
+    if not content or len(content) > 12000:
+        raise HTTPException(400, "Message must contain 1-12000 characters")
+    with connect() as c:
+        row = c.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Message not found")
+        c.execute("UPDATE messages SET content=? WHERE id=?", (content, message_id))
+        c.execute(
+            "UPDATE conversations SET updated_at=datetime('now') WHERE id=?",
+            (row["conversation_id"],)
+        )
+    return {"updated": True}
+
+@app.post("/api/chat/stream")
+def chat_stream(body: ChatRequest):
+    user_text = body.message.strip()
+    with connect() as c:
+        conv = c.execute("SELECT id,title FROM conversations WHERE id=?",
+                         (body.conversation_id,)).fetchone()
+        if not conv:
+            raise HTTPException(404, "Conversation not found")
+        cur = c.execute(
+            "INSERT INTO messages(conversation_id,role,content) VALUES(?,?,?)",
+            (body.conversation_id, "user", user_text)
+        )
+        user_message_id = cur.lastrowid
+        count = c.execute(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id=?",
+            (body.conversation_id,)
+        ).fetchone()[0]
+        if count == 1 and conv["title"] == "New chat":
+            c.execute(
+                "UPDATE conversations SET title=?,updated_at=datetime('now') WHERE id=?",
+                (user_text[:60], body.conversation_id)
+            )
+    messages = build_messages(body.conversation_id, user_text)
+    temperature = float(runtime_settings()["temperature"])
+
+    def generate():
+        chunks = []
+        try:
+            for token in stream_chat(messages, temperature=temperature):
+                chunks.append(token)
+                yield "data: " + json.dumps({"token": token}, ensure_ascii=False) + "\n\n"
+            answer = "".join(chunks).strip()
+            with connect() as c:
+                c.execute(
+                    "INSERT INTO messages(conversation_id,role,content) VALUES(?,?,?)",
+                    (body.conversation_id, "assistant", answer)
+                )
+                c.execute(
+                    "UPDATE conversations SET updated_at=datetime('now') WHERE id=?",
+                    (body.conversation_id,)
+                )
+                message_count = c.execute(
+                    "SELECT COUNT(*) FROM messages WHERE conversation_id=?",
+                    (body.conversation_id,)
+                ).fetchone()[0]
+            enqueue_job("extract_memory", {
+                "conversation_id": body.conversation_id,
+                "message_id": user_message_id,
+                "user_text": user_text
+            })
+            if message_count >= 20 and message_count % 10 == 0:
+                enqueue_job("summarize", {"conversation_id": body.conversation_id})
+            yield "data: " + json.dumps({"done": True}) + "\n\n"
+        except Exception as exc:
+            yield "data: " + json.dumps({"error": str(exc)}, ensure_ascii=False) + "\n\n"
+    return StreamingResponse(
+        generate(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    )
+
+@app.get("/api/memories")
+def memories(status: str | None = None):
+    if status and status not in {"pending", "active", "archived", "deleted"}:
+        raise HTTPException(400, "Invalid memory status")
+    return list_memories(status)
+
+@app.post("/api/memories")
+def add_memory(body: MemoryCreate):
+    try:
+        result = create_memory(
+            body.memory_type, body.category, body.content, body.importance,
+            body.confidence, status="active", user_approved=True
+        )
+        return result
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+@app.patch("/api/memories/{memory_id}")
+def patch_memory(memory_id: int, body: MemoryUpdate):
+    changes = body.model_dump(exclude_none=True)
+    result = update_memory(memory_id, changes)
+    if result is None:
+        raise HTTPException(404, "Memory not found")
+    return result
+
+@app.post("/api/memories/{memory_id}/approve")
+def approve(memory_id: int, body: dict | None = None):
+    result = approve_memory(memory_id, replace_conflict=bool((body or {}).get("replace_conflict", False)))
+    if result is None:
+        raise HTTPException(404, "Memory not found")
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+    return result
+
+@app.post("/api/memories/{memory_id}/archive")
+def archive(memory_id: int):
+    if not archive_memory(memory_id):
+        raise HTTPException(404, "Memory not found")
+    return {"archived": True}
+
+@app.delete("/api/memories/{memory_id}")
+def remove_memory(memory_id: int):
+    if not delete_memory(memory_id):
+        raise HTTPException(404, "Memory not found")
+    return {"deleted": True}
+
+@app.get("/api/memories/{memory_id}/history")
+def memory_history(memory_id: int):
+    return get_memory_history(memory_id)
+
+@app.get("/api/profile")
+def get_profile():
+    with connect() as c:
+        row = c.execute("SELECT profile_json,updated_at FROM user_profile WHERE id=1").fetchone()
+    return {"profile": json.loads(row["profile_json"]), "updated_at": row["updated_at"]}
+
+@app.patch("/api/profile")
+def patch_profile(body: ProfileUpdate):
+    with connect() as c:
+        row = c.execute("SELECT profile_json FROM user_profile WHERE id=1").fetchone()
+        profile = json.loads(row["profile_json"]) if row else {}
+        updates = body.model_dump(exclude_unset=True)
+        profile.update(updates)
+        c.execute(
+            """INSERT INTO user_profile(id,profile_json,updated_at) VALUES(1,?,datetime('now'))
+               ON CONFLICT(id) DO UPDATE SET profile_json=excluded.profile_json,updated_at=datetime('now')""",
+            (json.dumps(profile, ensure_ascii=False),)
+        )
+    return {"profile": profile}
+
+@app.get("/api/settings")
+def get_settings():
+    with connect() as c:
+        rows = c.execute("SELECT key,value_json FROM app_settings").fetchall()
+    return {r["key"]: json.loads(r["value_json"]) for r in rows}
+
+@app.patch("/api/settings")
+def patch_settings(body: SettingsUpdate):
+    allowed = {"temperature", "max_recent_messages", "max_context_memories", "max_context_chars", "personalization_enabled"}
+    invalid = set(body.values) - allowed
+    if invalid:
+        raise HTTPException(400, f"Unsupported settings: {', '.join(sorted(invalid))}")
+    ranges = {
+        "temperature": (0.0, 1.0),
+        "max_recent_messages": (2, 30),
+        "max_context_memories": (1, 30),
+        "max_context_chars": (4000, 50000),
+    }
+    for key, value in body.values.items():
+        if key == "personalization_enabled":
+            if not isinstance(value, bool):
+                raise HTTPException(400, "personalization_enabled must be true or false")
+            continue
+        low, high = ranges[key]
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or not low <= value <= high:
+            raise HTTPException(400, f"{key} must be between {low} and {high}")
+    with connect() as c:
+        for key, value in body.values.items():
+            c.execute(
+                """INSERT INTO app_settings(key,value_json) VALUES(?,?)
+                   ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json""",
+                (key, json.dumps(value))
+            )
+    return get_settings()
+
+@app.get("/api/jobs")
+def background_jobs():
+    with connect() as c:
+        rows = c.execute(
+            "SELECT id,job_type,status,attempts,error,created_at,updated_at FROM memory_jobs ORDER BY id DESC LIMIT 50"
+        ).fetchall()
+    return [dict(r) for r in rows]
