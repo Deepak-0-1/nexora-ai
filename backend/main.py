@@ -17,7 +17,11 @@ from backend.schemas import (
     ProfileUpdate, SettingsUpdate
 )
 
-app = FastAPI(title="Personal AI Assistant API", version="2.0.0")
+from backend.app.tools.registry import registry
+from backend.app.agents.orchestrator import orchestrator
+from backend.app.agents.state import RunStatus
+
+app = FastAPI(title="Personal AI Assistant API", version="3.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -279,3 +283,65 @@ def background_jobs():
             "SELECT id,job_type,status,attempts,error,created_at,updated_at FROM memory_jobs ORDER BY id DESC LIMIT 50"
         ).fetchall()
     return [dict(r) for r in rows]
+
+# --- V3 Agent, Tools & Artifact APIs ---
+
+@app.get("/api/tools")
+def list_available_tools():
+    """Lists all registered tools and their schema definitions."""
+    return registry.get_schemas()
+
+@app.post("/api/agent/runs")
+async def create_agent_run(payload: dict):
+    """Initializes an agent execution run with planning for a user request."""
+    conversation_id = payload.get("conversation_id", "default")
+    user_query = payload.get("query", "")
+    if not user_query:
+        raise HTTPException(400, "Query cannot be empty")
+
+    state = await orchestrator.initialize_run(conversation_id, user_query)
+    return state.model_dump()
+
+@app.get("/api/agent/runs/{run_id}")
+def get_agent_run(run_id: str):
+    """Retrieves current state of an agent execution run."""
+    state = orchestrator.get_run(run_id)
+    if not state:
+        raise HTTPException(404, f"Agent run '{run_id}' not found")
+    return state.model_dump()
+
+@app.post("/api/agent/runs/{run_id}/approve")
+def approve_agent_step(run_id: str, payload: dict):
+    """Approves a blocked high-impact step (e.g. email sending, code execution)."""
+    step_id = payload.get("step_id")
+    if step_id is None:
+        raise HTTPException(400, "Missing 'step_id'")
+    success = orchestrator.approve_step(run_id, int(step_id))
+    if not success:
+        raise HTTPException(400, f"Unable to approve step {step_id} on run '{run_id}'")
+    return {"status": "approved", "run_id": run_id, "step_id": step_id}
+
+@app.post("/api/agent/runs/{run_id}/cancel")
+def cancel_agent_run(run_id: str):
+    """Cancels an active agent run."""
+    success = orchestrator.cancel_run(run_id)
+    if not success:
+        raise HTTPException(404, f"Agent run '{run_id}' not found")
+    return {"status": "cancelled", "run_id": run_id}
+
+@app.get("/api/agent/runs/{run_id}/stream")
+async def stream_agent_run(run_id: str):
+    """SSE stream of step executions, results, and approval checkpoints for a run."""
+    async def event_generator():
+        async for event in orchestrator.run_until_complete_or_blocked(run_id):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.get("/api/artifacts")
+def list_artifacts():
+    """Lists all generated reports (Excel, Word, PDF)."""
+    with connect() as c:
+        rows = c.execute("SELECT * FROM generated_artifacts ORDER BY created_at DESC LIMIT 50").fetchall()
+        return [dict(r) for r in rows]
+
