@@ -34,9 +34,11 @@ export default function ChatPage({conversationId,messages,onMessages,onRefresh}:
       },(request)=>{
         setApproval(request);
       },(status)=>{
-        setToolStatus(status.tool_status === "started"
-          ? "Running " + (status.tool_name || "tool") + "…"
-          : "Completed " + (status.tool_name || "tool"));
+        setToolStatus(status.tool_status === "planning"
+          ? "Planning request…"
+          : status.tool_status === "started"
+            ? "Running " + (status.tool_name || "tool") + "…"
+            : "Completed " + (status.tool_name || "tool"));
       });
       onRefresh();
     } catch(e) {
