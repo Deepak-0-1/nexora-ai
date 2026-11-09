@@ -100,4 +100,6 @@ async def test_orchestrator_approval_checkpoint():
     assert state.status == RunStatus.COMPLETED
     assert state.plan.steps[0].status == StepStatus.COMPLETED
     assert state.plan.steps[0].result == {"deleted": "temp_table"}
+    # Completed steps cannot be approved and replayed.
+    assert orch.approve_step(state.run_id, 1) is False
 
