@@ -3,7 +3,7 @@ import { ArrowUp, Sparkles, Bot, User } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Message } from "../types";
-import { streamChat } from "../services/api";
+import { approveChatTool, streamChat, type ApprovalRequest } from "../services/api";
 
 interface Props {
   conversationId: string | null;
@@ -15,12 +15,14 @@ export default function ChatPage({conversationId,messages,onMessages,onRefresh}:
   const [input,setInput] = useState("");
   const [busy,setBusy] = useState(false);
   const [error,setError] = useState("");
+  const [approval,setApproval] = useState<ApprovalRequest | null>(null);
+  const [toolStatus,setToolStatus] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(()=>{endRef.current?.scrollIntoView({behavior:"smooth"})},[messages]);
   async function send(text=input) {
     const value=text.trim();
     if(!value || !conversationId || busy) return;
-    setInput(""); setError(""); setBusy(true);
+    setInput(""); setError(""); setApproval(null); setToolStatus(""); setBusy(true);
     const userMessage:Message={id:Date.now(),role:"user",content:value,created_at:new Date().toISOString()};
     const assistantMessage:Message={id:Date.now()+1,role:"assistant",content:"",created_at:new Date().toISOString()};
     onMessages([...messages,userMessage,assistantMessage]);
@@ -29,11 +31,40 @@ export default function ChatPage({conversationId,messages,onMessages,onRefresh}:
       await streamChat(conversationId,value,(token)=>{
         answer+=token;
         onMessages([...messages,userMessage,{...assistantMessage,content:answer}]);
+      },(request)=>{
+        setApproval(request);
+      },(status)=>{
+        setToolStatus(status.tool_status === "started"
+          ? "Running " + (status.tool_name || "tool") + "…"
+          : "Completed " + (status.tool_name || "tool"));
       });
       onRefresh();
     } catch(e) {
       setError(e instanceof Error?e.message:"Response failed");
       onMessages([...messages,userMessage]);
+    } finally { setBusy(false); }
+  }
+  async function approvePendingTool() {
+    if (!approval || busy) return;
+    setBusy(true); setError("");
+    try {
+      const result = await approveChatTool(approval.run_id, approval.step_id);
+      if (result.approval_required) {
+        setApproval(result.approval_required);
+        return;
+      }
+      if (result.answer) {
+        const assistantMessage: Message = {
+          id: Date.now(), role: "assistant", content: result.answer,
+          created_at: new Date().toISOString()
+        };
+        onMessages([...messages, assistantMessage]);
+      }
+      setApproval(null);
+      setToolStatus("");
+      onRefresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Approval failed");
     } finally { setBusy(false); }
   }
   return <main className="relative flex min-w-0 flex-1 flex-col bg-[#FCFCFD]">
@@ -65,6 +96,14 @@ export default function ChatPage({conversationId,messages,onMessages,onRefresh}:
           </article>)}
           {busy && <div className="ml-11 flex items-center gap-2 text-xs text-muted"><span className="typing-dot"/> Generating response</div>}
           <div ref={endRef}/>
+        </div>}
+        {toolStatus && <div className="mt-3 ml-11 text-xs text-muted">{toolStatus}</div>}
+        {approval && <div className="mt-4 ml-11 max-w-[560px] rounded-xl border border-amber-300 bg-amber-50 p-4">
+          <div className="text-sm font-semibold text-amber-900">Approval required</div>
+          <p className="mt-1 text-xs leading-5 text-amber-800">Nexora wants to run <strong>{approval.tool_name}</strong>. Review the action before allowing it to continue.</p>
+          <button onClick={approvePendingTool} disabled={busy} className="mt-3 rounded-lg bg-[#344C73] px-4 py-2 text-xs font-semibold text-white disabled:opacity-50">
+            {busy ? "Continuing…" : "Approve and continue"}
+          </button>
         </div>}
         {error && <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">{error}</div>}
       </div>
