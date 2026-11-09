@@ -5,6 +5,17 @@ def test_conversational_request_does_not_select_tools():
     assert tool_router.candidate_tool_names("Explain what a vector database is") == []
 
 
+def test_conceptual_database_question_does_not_select_sql_tools():
+    names = tool_router.candidate_tool_names("Explain what a vector database is")
+    assert names == []
+
+
+def test_operational_database_request_selects_sql_tools():
+    names = tool_router.candidate_tool_names("List database connections and show available tables")
+    assert "list_database_connections" in names
+    assert "list_database_tables" in names
+
+
 def test_web_search_request_selects_web_tools():
     names = tool_router.candidate_tool_names("Search the web for the latest LangGraph release")
     assert "web_search" in names
