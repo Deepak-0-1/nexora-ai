@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, Optional, AsyncGenerator, Any
 from backend.app.agents.state import AgentState, AgentPlan, AgentStep, RunStatus, StepStatus, utc_now_iso
-from backend.app.agents.planner import Planner
+from backend.app.agents.planner import Planner, PlannerError
 from backend.app.tools.registry import registry
 from backend.app.tools.base import ToolResult
 
@@ -34,8 +34,16 @@ class Orchestrator:
         )
         RUNS[run_id] = state
 
-        # Generate plan
-        plan = await self.planner.plan(user_query, conversation_history)
+        # Keep planning failures visible instead of treating them as successful
+        # conversational runs with no tool steps.
+        try:
+            plan = await self.planner.plan(user_query, conversation_history)
+        except PlannerError as exc:
+            state.status = RunStatus.FAILED
+            state.error = str(exc)
+            state.update_timestamp()
+            return state
+
         state.plan = plan
         state.status = RunStatus.RUNNING if plan.steps else RunStatus.COMPLETED
         state.update_timestamp()
