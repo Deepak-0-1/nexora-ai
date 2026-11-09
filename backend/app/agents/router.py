@@ -27,7 +27,7 @@ RULES = {
     "web": ("search the web", "web search", "internet", "latest", "current news", "online", "research", "website", "url", "documentation"),
     "documents": ("pdf", "document", "uploaded file", "indexed", "in the report", "in this file", "ask this file", "summarize this file"),
     "data": ("excel", "spreadsheet", "csv", "workbook", "dataframe", "dataset", "rows", "columns", "missing values", "statistics", "profile data"),
-    "sql": ("database", "sql", "query", "table", "tables", "schema", "revenue", "records"),
+    "sql": ("database connection", "database connections", "list database", "list databases", "show tables", "show me tables", "list tables", "describe table", "table schema", "database schema", "sql query", "run sql", "execute sql", "query the database", "query database", "from the database", "in the database", "database records", "fetch records", "select *", "select from"),
     "files": ("list files", "read file", "copy file", "folder", "directory", "local file"),
     "python": ("calculate", "compute", "run python", "execute python", "plot", "chart", "statistical test"),
     "reports": ("generate a report", "create a report", "pdf report", "word report", "docx", "excel report"),
@@ -45,8 +45,17 @@ class ToolRouter:
             if any(phrase in text for phrase in phrases):
                 matched.add(capability)
 
-        # Explicitly preserve multi-stage data workflows.
-        if any(x in text for x in ("database", "sql", "table", "query")):
+        # SQL is an operational capability. Do not route conceptual questions
+        # merely because they mention a "database", "table", or "query".
+        sql_action_phrases = (
+            "database connection", "database connections", "list database",
+            "list databases", "show tables", "show me tables", "list tables",
+            "describe table", "table schema", "database schema", "sql query",
+            "run sql", "execute sql", "query the database", "query database",
+            "from the database", "in the database", "database records",
+            "fetch records", "select *", "select from"
+        )
+        if any(phrase in text for phrase in sql_action_phrases):
             matched.add("sql")
         if any(x in text for x in ("excel", "spreadsheet", "csv")):
             matched.add("data")
