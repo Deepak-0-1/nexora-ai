@@ -33,8 +33,7 @@ class WebSearchTool(BaseTool):
                     success=False,
                     error=(
                         f"Web search returned no usable results for: {query}. "
-                        "No current information was verified. Do not answer this as a current-fact request "
-                        "from model memory; report that the search could not be completed."
+                        "Current information could not be verified."
                     ),
                     metadata={"query": query, "result_count": 0},
                 )
