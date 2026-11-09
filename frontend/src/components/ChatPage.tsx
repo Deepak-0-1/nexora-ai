@@ -21,7 +21,7 @@ export default function ChatPage({conversationId,messages,onMessages,onRefresh}:
   useEffect(()=>{endRef.current?.scrollIntoView({behavior:"smooth"})},[messages]);
   async function send(text=input) {
     const value=text.trim();
-    if(!value || !conversationId || busy) return;
+    if(!value || !conversationId || busy || approval) return;
     setInput(""); setError(""); setApproval(null); setToolStatus(""); setBusy(true);
     const userMessage:Message={id:Date.now(),role:"user",content:value,created_at:new Date().toISOString()};
     const assistantMessage:Message={id:Date.now()+1,role:"assistant",content:"",created_at:new Date().toISOString()};
@@ -125,7 +125,7 @@ export default function ChatPage({conversationId,messages,onMessages,onRefresh}:
           <textarea value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send()}}} rows={2} placeholder="Message your assistant..." className="max-h-36 min-h-[48px] w-full resize-y bg-transparent px-1 py-1 text-sm leading-6 text-ink outline-none placeholder:text-[#A0A7B2]" />
           <div className="flex items-center justify-between pt-2">
             <div className="flex items-center gap-1 text-[#929AA6]"><span className="text-[10px]">Local conversation</span></div>
-            <button disabled={!input.trim()||busy||!conversationId} onClick={()=>send()} className="grid h-9 w-9 place-items-center rounded-xl bg-[#344C73] text-white transition hover:bg-[#293E60] disabled:cursor-not-allowed disabled:bg-[#C8CED8]"><ArrowUp size={18}/></button>
+            <button disabled={!input.trim()||busy||!conversationId||!!approval} onClick={()=>send()} className="grid h-9 w-9 place-items-center rounded-xl bg-[#344C73] text-white transition hover:bg-[#293E60] disabled:cursor-not-allowed disabled:bg-[#C8CED8]"><ArrowUp size={18}/></button>
           </div>
         </div>
         <p className="mt-2 text-center text-[10px] text-[#A1A7B1]">AI can make mistakes. Verify important information.</p>
