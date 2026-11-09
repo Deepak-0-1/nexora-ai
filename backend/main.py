@@ -3,6 +3,7 @@ import uuid
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 from backend.config import CORS_ORIGINS
 from backend.db import connect, init_db
 from backend.ollama_client import stream_chat, chat_once, check_ollama, OllamaError
@@ -123,7 +124,7 @@ def _save_assistant_message(conversation_id: str, answer: str) -> None:
         )
 
 
-def _compose_agent_response(conversation_id: str, user_text: str, state) -> str:
+async def _compose_agent_response(conversation_id: str, user_text: str, state) -> str:
     """Turn structured tool outputs into a grounded assistant response."""
     tool_outputs = []
     if state.plan:
@@ -148,7 +149,12 @@ def _compose_agent_response(conversation_id: str, user_text: str, state) -> str:
                    "Explain the outcome and answer my request using these results:\n"
                    + json.dumps(tool_outputs, ensure_ascii=False, default=str)[:24000]
     })
-    return chat_once(messages, temperature=float(runtime_settings()["temperature"]), num_predict=900)
+    return await run_in_threadpool(
+        chat_once,
+        messages,
+        temperature=float(runtime_settings()["temperature"]),
+        num_predict=900
+    )
 
 
 @app.post("/api/chat/stream")
@@ -225,12 +231,14 @@ def chat_stream(body: ChatRequest):
                 if state.status == RunStatus.FAILED:
                     answer = "The requested tool operation failed: " + (state.error or "Unknown tool error")
                 else:
-                    answer = _compose_agent_response(body.conversation_id, user_text, state)
+                    answer = await _compose_agent_response(body.conversation_id, user_text, state)
                 _save_assistant_message(body.conversation_id, answer)
                 yield "data: " + json.dumps({"token": answer}, ensure_ascii=False) + "\n\n"
             else:
                 messages = build_messages(body.conversation_id, user_text)
-                for token in stream_chat(messages, temperature=float(runtime_settings()["temperature"])):
+                async for token in iterate_in_threadpool(
+                    stream_chat(messages, temperature=float(runtime_settings()["temperature"]))
+                ):
                     chunks.append(token)
                     yield "data: " + json.dumps({"token": token}, ensure_ascii=False) + "\n\n"
                 answer = "".join(chunks).strip()
@@ -290,7 +298,7 @@ async def approve_chat_agent_step(run_id: str, payload: dict):
     elif state.status == RunStatus.CANCELLED:
         raise HTTPException(409, "Agent run was cancelled")
     else:
-        answer = _compose_agent_response(state.conversation_id, state.user_query, state)
+        answer = await _compose_agent_response(state.conversation_id, state.user_query, state)
     _save_assistant_message(state.conversation_id, answer)
     with connect() as c:
         latest_user = c.execute(
