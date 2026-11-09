@@ -1,8 +1,27 @@
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, Mock
+
 from backend.app.tools.web.search import WebSearchTool, OpenUrlTool
 from backend.app.tools.web.extractor import extract_clean_text_from_html
 from backend.app.security.path_validator import is_safe_url
+from backend.app.integrations.search_provider import SearchProvider
+
+
+SAMPLE_DDG_HTML = """
+<div class="result results_links results_links_deep">
+  <div class="result__title">
+    <a class="result__a" href="https://www.python.org/downloads/">Python Releases</a>
+  </div>
+  <div class="result__snippet">Download the latest Python release.</div>
+</div>
+<div class="result results_links results_links_deep">
+  <div class="result__title">
+    <a class="result__a" href="//example.com/docs">Example Documentation</a>
+  </div>
+  <div class="result__snippet"><span>Read the documentation</span> for details.</div>
+</div>
+"""
+
 
 def test_extract_clean_text_from_html():
     sample_html = """
@@ -27,18 +46,17 @@ def test_extract_clean_text_from_html():
     assert "var x = 123;" not in text
     assert "color: red" not in text
 
+
 def test_ssrf_protection():
-    # Dangerous URLs
     assert is_safe_url("http://127.0.0.1/admin")[0] is False
     assert is_safe_url("http://localhost:8000/api")[0] is False
     assert is_safe_url("http://192.168.1.1/router")[0] is False
     assert is_safe_url("http://10.0.0.1/internal")[0] is False
     assert is_safe_url("ftp://example.com/file")[0] is False
     assert is_safe_url("file:///etc/passwd")[0] is False
-
-    # Safe public URLs
     assert is_safe_url("https://example.com")[0] is True
     assert is_safe_url("https://en.wikipedia.org/wiki/Python_(programming_language)")[0] is True
+
 
 @pytest.mark.anyio
 async def test_web_search_tool_mocked():
@@ -54,12 +72,24 @@ async def test_web_search_tool_mocked():
         assert res.data["count"] == 2
         assert res.metadata["citations"] == ["https://example.com/1", "https://example.com/2"]
 
+
+@pytest.mark.anyio
+async def test_web_search_tool_fails_when_no_results():
+    tool = WebSearchTool()
+    with patch("backend.app.integrations.search_provider.default_search_provider.search", return_value=[]):
+        res = await tool.execute(query="latest Python release", max_results=5)
+    assert res.success is False
+    assert "No current information was verified" in res.error
+    assert res.metadata["result_count"] == 0
+
+
 @pytest.mark.anyio
 async def test_open_url_ssrf_blocked():
     tool = OpenUrlTool()
     res = await tool.execute(url="http://127.0.0.1:8000/secret")
     assert res.success is False
     assert "Security violation" in res.error
+
 
 @pytest.mark.anyio
 async def test_open_url_mocked_fetch():
@@ -74,3 +104,51 @@ async def test_open_url_mocked_fetch():
         assert res.success is True
         assert "Docs" in res.data["content"]
         assert "Welcome to V3." in res.data["content"]
+
+
+def test_duckduckgo_parser_extracts_result_link_and_div_snippet():
+    provider = SearchProvider()
+    response = Mock(status_code=200, text=SAMPLE_DDG_HTML)
+    response.raise_for_status.return_value = None
+
+    with patch("backend.app.integrations.search_provider.requests.get", return_value=response):
+        results = provider._search_duckduckgo_html("latest Python release", 5)
+
+    assert len(results) == 2
+    assert results[0] == {
+        "title": "Python Releases",
+        "url": "https://www.python.org/downloads/",
+        "snippet": "Download the latest Python release.",
+    }
+    assert results[1]["url"] == "https://example.com/docs"
+    assert results[1]["snippet"] == "Read the documentation for details."
+
+
+def test_duckduckgo_parser_respects_max_results():
+    provider = SearchProvider()
+    response = Mock(status_code=200, text=SAMPLE_DDG_HTML)
+    response.raise_for_status.return_value = None
+
+    with patch("backend.app.integrations.search_provider.requests.get", return_value=response):
+        results = provider._search_duckduckgo_html("python", 1)
+
+    assert len(results) == 1
+
+
+def test_duckduckgo_parser_returns_empty_for_block_page():
+    provider = SearchProvider()
+    response = Mock(status_code=200, text="<html><body>Request blocked</body></html>")
+    response.raise_for_status.return_value = None
+
+    with patch("backend.app.integrations.search_provider.requests.get", return_value=response):
+        assert provider._search_duckduckgo_html("python", 5) == []
+
+
+def test_duckduckgo_network_error_returns_empty_results():
+    provider = SearchProvider()
+
+    with patch(
+        "backend.app.integrations.search_provider.requests.get",
+        side_effect=__import__("requests").RequestException("network unavailable"),
+    ):
+        assert provider._search_duckduckgo_html("python", 5) == []
