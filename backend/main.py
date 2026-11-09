@@ -3,9 +3,10 @@ import uuid
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 from backend.config import CORS_ORIGINS
 from backend.db import connect, init_db
-from backend.ollama_client import stream_chat, check_ollama, OllamaError
+from backend.ollama_client import stream_chat, chat_once, check_ollama, OllamaError
 from backend.context import build_messages, runtime_settings
 from backend.jobs import enqueue_job, start_worker, stop_worker
 from backend.memory import (
@@ -111,6 +112,51 @@ def edit_message(message_id: int, body: dict):
         )
     return {"updated": True}
 
+def _save_assistant_message(conversation_id: str, answer: str) -> None:
+    with connect() as c:
+        c.execute(
+            "INSERT INTO messages(conversation_id,role,content) VALUES(?,?,?)",
+            (conversation_id, "assistant", answer)
+        )
+        c.execute(
+            "UPDATE conversations SET updated_at=datetime('now') WHERE id=?",
+            (conversation_id,)
+        )
+
+
+async def _compose_agent_response(conversation_id: str, user_text: str, state) -> str:
+    """Turn structured tool outputs into a grounded assistant response."""
+    tool_outputs = []
+    if state.plan:
+        for step in state.plan.steps:
+            tool_outputs.append({
+                "tool": step.tool_name,
+                "description": step.description,
+                "success": step.status.value == "completed",
+                "result": step.result if step.status.value == "completed" else step.error
+            })
+
+    messages = build_messages(conversation_id, user_text)
+    messages[0]["content"] += (
+        "\n\nTOOL USE POLICY:\n"
+        "Use the tool results below as the source of truth. Do not claim an action "
+        "succeeded unless its result says it succeeded. If a result is incomplete, "
+        "state the limitation. Never invent missing values. Give a concise answer."
+    )
+    messages.append({
+        "role": "user",
+        "content": "The following are results from tools you executed for my request. "
+                   "Explain the outcome and answer my request using these results:\n"
+                   + json.dumps(tool_outputs, ensure_ascii=False, default=str)[:24000]
+    })
+    return await run_in_threadpool(
+        chat_once,
+        messages,
+        temperature=float(runtime_settings()["temperature"]),
+        num_predict=900
+    )
+
+
 @app.post("/api/chat/stream")
 def chat_stream(body: ChatRequest):
     user_text = body.message.strip()
@@ -119,6 +165,11 @@ def chat_stream(body: ChatRequest):
                          (body.conversation_id,)).fetchone()
         if not conv:
             raise HTTPException(404, "Conversation not found")
+        history_rows = c.execute(
+            "SELECT role,content FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT 8",
+            (body.conversation_id,)
+        ).fetchall()
+        history = [{"role": row["role"], "content": row["content"]} for row in reversed(history_rows)]
         cur = c.execute(
             "INSERT INTO messages(conversation_id,role,content) VALUES(?,?,?)",
             (body.conversation_id, "user", user_text)
@@ -133,25 +184,68 @@ def chat_stream(body: ChatRequest):
                 "UPDATE conversations SET title=?,updated_at=datetime('now') WHERE id=?",
                 (user_text[:60], body.conversation_id)
             )
-    messages = build_messages(body.conversation_id, user_text)
-    temperature = float(runtime_settings()["temperature"])
 
-    def generate():
+    async def generate():
         chunks = []
         try:
-            for token in stream_chat(messages, temperature=temperature):
-                chunks.append(token)
-                yield "data: " + json.dumps({"token": token}, ensure_ascii=False) + "\n\n"
-            answer = "".join(chunks).strip()
+            yield "data: " + json.dumps({"tool_status": "planning"}, ensure_ascii=False) + "\n\n"
+            state = await orchestrator.initialize_run(
+                body.conversation_id, user_text, history
+            )
+
+            if state.status == RunStatus.FAILED:
+                answer = "I couldn't safely plan the requested tool actions: " + (state.error or "Unknown planning error")
+                _save_assistant_message(body.conversation_id, answer)
+                yield "data: " + json.dumps({"token": answer}, ensure_ascii=False) + "\n\n"
+                yield "data: " + json.dumps({"done": True}) + "\n\n"
+                return
+
+            if state.plan and state.plan.steps:
+                yield "data: " + json.dumps({"agent_status": "executing"}, ensure_ascii=False) + "\n\n"
+                async for event in orchestrator.run_until_complete_or_blocked(state.run_id):
+                    event_type = event.get("type")
+                    if event_type == "step_started":
+                        step = event.get("step", {})
+                        yield "data: " + json.dumps({
+                            "tool_status": "started",
+                            "tool_name": step.get("tool_name"),
+                            "description": step.get("description")
+                        }, ensure_ascii=False) + "\n\n"
+                    elif event_type == "step_completed":
+                        step = event.get("step", {})
+                        yield "data: " + json.dumps({
+                            "tool_status": "completed",
+                            "tool_name": step.get("tool_name")
+                        }, ensure_ascii=False) + "\n\n"
+                    elif event_type == "waiting_approval":
+                        step = event.get("step", {})
+                        yield "data: " + json.dumps({
+                            "approval_required": {
+                                "run_id": state.run_id,
+                                "step_id": step.get("step_id"),
+                                "tool_name": step.get("tool_name"),
+                                "arguments": step.get("arguments", {})
+                            }
+                        }, ensure_ascii=False) + "\n\n"
+                        return
+
+                if state.status == RunStatus.FAILED:
+                    answer = "The requested tool operation failed: " + (state.error or "Unknown tool error")
+                else:
+                    answer = await _compose_agent_response(body.conversation_id, user_text, state)
+                _save_assistant_message(body.conversation_id, answer)
+                yield "data: " + json.dumps({"token": answer}, ensure_ascii=False) + "\n\n"
+            else:
+                messages = build_messages(body.conversation_id, user_text)
+                async for token in iterate_in_threadpool(
+                    stream_chat(messages, temperature=float(runtime_settings()["temperature"]))
+                ):
+                    chunks.append(token)
+                    yield "data: " + json.dumps({"token": token}, ensure_ascii=False) + "\n\n"
+                answer = "".join(chunks).strip()
+                _save_assistant_message(body.conversation_id, answer)
+
             with connect() as c:
-                c.execute(
-                    "INSERT INTO messages(conversation_id,role,content) VALUES(?,?,?)",
-                    (body.conversation_id, "assistant", answer)
-                )
-                c.execute(
-                    "UPDATE conversations SET updated_at=datetime('now') WHERE id=?",
-                    (body.conversation_id,)
-                )
                 message_count = c.execute(
                     "SELECT COUNT(*) FROM messages WHERE conversation_id=?",
                     (body.conversation_id,)
@@ -165,11 +259,67 @@ def chat_stream(body: ChatRequest):
                 enqueue_job("summarize", {"conversation_id": body.conversation_id})
             yield "data: " + json.dumps({"done": True}) + "\n\n"
         except Exception as exc:
+            logger.exception("Chat request failed")
             yield "data: " + json.dumps({"error": str(exc)}, ensure_ascii=False) + "\n\n"
+
     return StreamingResponse(
         generate(), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     )
+
+
+@app.post("/api/chat/agent/{run_id}/approve")
+async def approve_chat_agent_step(run_id: str, payload: dict):
+    """Approve one gated tool step, resume the run, and return its final answer."""
+    step_id = payload.get("step_id")
+    if step_id is None:
+        raise HTTPException(400, "Missing 'step_id'")
+    state = orchestrator.get_run(run_id)
+    if not state:
+        raise HTTPException(404, "Agent run not found")
+    if not orchestrator.approve_step(run_id, int(step_id)):
+        raise HTTPException(400, "Unable to approve this agent step")
+
+    waiting = None
+    async for event in orchestrator.run_until_complete_or_blocked(run_id):
+        if event.get("type") == "waiting_approval":
+            waiting = event
+            break
+    if waiting:
+        step = waiting.get("step", {})
+        return {"approval_required": {
+            "run_id": run_id,
+            "step_id": step.get("step_id"),
+            "tool_name": step.get("tool_name"),
+            "arguments": step.get("arguments", {})
+        }}
+
+    if state.status == RunStatus.FAILED:
+        answer = "The requested tool operation failed: " + (state.error or "Unknown tool error")
+    elif state.status == RunStatus.CANCELLED:
+        raise HTTPException(409, "Agent run was cancelled")
+    else:
+        answer = await _compose_agent_response(state.conversation_id, state.user_query, state)
+    _save_assistant_message(state.conversation_id, answer)
+    with connect() as c:
+        latest_user = c.execute(
+            "SELECT id FROM messages WHERE conversation_id=? AND role='user' ORDER BY id DESC LIMIT 1",
+            (state.conversation_id,)
+        ).fetchone()
+        message_count = c.execute(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id=?",
+            (state.conversation_id,)
+        ).fetchone()[0]
+    if latest_user:
+        enqueue_job("extract_memory", {
+            "conversation_id": state.conversation_id,
+            "message_id": latest_user["id"],
+            "user_text": state.user_query
+        })
+    if message_count >= 20 and message_count % 10 == 0:
+        enqueue_job("summarize", {"conversation_id": state.conversation_id})
+    return {"answer": answer, "status": state.status.value}
+
 
 @app.get("/api/memories")
 def memories(status: str | None = None):

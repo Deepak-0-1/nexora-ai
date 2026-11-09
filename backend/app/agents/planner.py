@@ -68,15 +68,18 @@ class Planner:
         if not isinstance(data, dict) or not isinstance(data.get("steps", []), list):
             raise PlannerError("Planner response must be a JSON object with a steps array.")
 
+        allowed_names = set(tool_router.candidate_tool_names(user_query))
         steps = []
         seen_ids = set()
         for index, item in enumerate(data.get("steps", []), start=1):
             if not isinstance(item, dict):
                 raise PlannerError(f"Plan step {index} must be an object.")
             name = item.get("tool_name")
-            tool = registry.get_tool(name) if isinstance(name, str) else None
+            if not isinstance(name, str) or name not in allowed_names:
+                raise PlannerError(f"Planner selected a tool outside the routed capabilities: {name!r}.")
+            tool = registry.get_tool(name)
             if tool is None:
-                raise PlannerError(f"Planner selected an unknown tool: {name!r}.")
+                raise PlannerError(f"Planner selected an unavailable tool: {name!r}.")
             arguments = item.get("arguments", {})
             if not isinstance(arguments, dict):
                 raise PlannerError(f"Arguments for {name} must be an object.")

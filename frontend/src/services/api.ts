@@ -31,10 +31,26 @@ export const api = {
   updateSettings: (values: Record<string, unknown>) => request("/api/settings", { method: "PATCH", body: JSON.stringify({ values }) })
 };
 
+export interface ApprovalRequest {
+  run_id: string;
+  step_id: number;
+  tool_name: string;
+  arguments?: Record<string, unknown>;
+}
+
+export async function approveChatTool(runId: string, stepId: number): Promise<{answer?: string; status?: string; approval_required?: ApprovalRequest}> {
+  return request(`/api/chat/agent/${runId}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ step_id: stepId })
+  });
+}
+
 export async function streamChat(
   conversationId: string,
   message: string,
-  onToken: (token: string) => void
+  onToken: (token: string) => void,
+  onApproval?: (approval: ApprovalRequest) => void,
+  onToolStatus?: (status: {tool_status: string; tool_name?: string; description?: string}) => void
 ): Promise<void> {
   const response = await fetch("/api/chat/stream", {
     method: "POST",
@@ -59,6 +75,8 @@ export async function streamChat(
       if (!line) continue;
       const payload = JSON.parse(line.slice(6));
       if (payload.token) onToken(payload.token);
+      if (payload.approval_required) onApproval?.(payload.approval_required);
+      if (payload.tool_status) onToolStatus?.(payload);
       if (payload.error) throw new Error(payload.error);
     }
   }
