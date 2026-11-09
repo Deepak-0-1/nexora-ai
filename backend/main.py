@@ -188,6 +188,7 @@ def chat_stream(body: ChatRequest):
     async def generate():
         chunks = []
         try:
+            yield "data: " + json.dumps({"tool_status": "planning"}, ensure_ascii=False) + "\n\n"
             state = await orchestrator.initialize_run(
                 body.conversation_id, user_text, history
             )
