@@ -163,6 +163,8 @@ class Orchestrator:
 
         for step in state.plan.steps:
             if step.step_id == step_id:
+                if step.status != StepStatus.WAITING_APPROVAL:
+                    return False
                 step.approved = True
                 if step.status == StepStatus.WAITING_APPROVAL:
                     step.status = StepStatus.PENDING
