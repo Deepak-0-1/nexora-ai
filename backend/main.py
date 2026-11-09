@@ -1,4 +1,3 @@
-import asyncio
 import json
 import uuid
 from fastapi import FastAPI, HTTPException, Query
@@ -180,14 +179,12 @@ def chat_stream(body: ChatRequest):
                 (user_text[:60], body.conversation_id)
             )
 
-    def generate():
+    async def generate():
         chunks = []
         try:
-            # The sync generator runs in FastAPI's worker thread. asyncio.run
-            # safely drives the async planner and orchestrator from that thread.
-            state = asyncio.run(orchestrator.initialize_run(
+            state = await orchestrator.initialize_run(
                 body.conversation_id, user_text, history
-            ))
+            )
 
             if state.status == RunStatus.FAILED:
                 answer = "I couldn't safely plan the requested tool actions: " + (state.error or "Unknown planning error")
@@ -197,10 +194,8 @@ def chat_stream(body: ChatRequest):
                 return
 
             if state.plan and state.plan.steps:
-                async def collect_events():
-                    return [event async for event in orchestrator.run_until_complete_or_blocked(state.run_id)]
-                events = asyncio.run(collect_events())
-                for event in events:
+                yield "data: " + json.dumps({"agent_status": "executing"}, ensure_ascii=False) + "\n\n"
+                async for event in orchestrator.run_until_complete_or_blocked(state.run_id):
                     event_type = event.get("type")
                     if event_type == "step_started":
                         step = event.get("step", {})
@@ -234,7 +229,6 @@ def chat_stream(body: ChatRequest):
                 _save_assistant_message(body.conversation_id, answer)
                 yield "data: " + json.dumps({"token": answer}, ensure_ascii=False) + "\n\n"
             else:
-                # No tool route matched. Keep the normal conversational path.
                 messages = build_messages(body.conversation_id, user_text)
                 for token in stream_chat(messages, temperature=float(runtime_settings()["temperature"])):
                     chunks.append(token)
@@ -266,7 +260,7 @@ def chat_stream(body: ChatRequest):
 
 
 @app.post("/api/chat/agent/{run_id}/approve")
-def approve_chat_agent_step(run_id: str, payload: dict):
+async def approve_chat_agent_step(run_id: str, payload: dict):
     """Approve one gated tool step, resume the run, and return its final answer."""
     step_id = payload.get("step_id")
     if step_id is None:
@@ -277,10 +271,11 @@ def approve_chat_agent_step(run_id: str, payload: dict):
     if not orchestrator.approve_step(run_id, int(step_id)):
         raise HTTPException(400, "Unable to approve this agent step")
 
-    async def collect_events():
-        return [event async for event in orchestrator.run_until_complete_or_blocked(run_id)]
-    events = asyncio.run(collect_events())
-    waiting = next((event for event in events if event.get("type") == "waiting_approval"), None)
+    waiting = None
+    async for event in orchestrator.run_until_complete_or_blocked(run_id):
+        if event.get("type") == "waiting_approval":
+            waiting = event
+            break
     if waiting:
         step = waiting.get("step", {})
         return {"approval_required": {
