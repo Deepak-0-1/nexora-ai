@@ -79,7 +79,7 @@ async def test_web_search_tool_fails_when_no_results():
     with patch("backend.app.integrations.search_provider.default_search_provider.search", return_value=[]):
         res = await tool.execute(query="latest Python release", max_results=5)
     assert res.success is False
-    assert "No current information was verified" in res.error
+    assert "Current information could not be verified" in res.error
     assert res.metadata["result_count"] == 0
 
 
