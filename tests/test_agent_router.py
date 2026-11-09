@@ -6,7 +6,7 @@ def test_conversational_request_does_not_select_tools():
 
 
 def test_conceptual_database_question_does_not_select_sql_tools():
-    names = tool_router.candidate_tool_names("Explain what a vector database is")
+    names = tool_router.candidate_tool_names("Explain how database indexing works")
     assert names == []
 
 
