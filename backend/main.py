@@ -297,6 +297,23 @@ def approve_chat_agent_step(run_id: str, payload: dict):
     else:
         answer = _compose_agent_response(state.conversation_id, state.user_query, state)
     _save_assistant_message(state.conversation_id, answer)
+    with connect() as c:
+        latest_user = c.execute(
+            "SELECT id FROM messages WHERE conversation_id=? AND role='user' ORDER BY id DESC LIMIT 1",
+            (state.conversation_id,)
+        ).fetchone()
+        message_count = c.execute(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id=?",
+            (state.conversation_id,)
+        ).fetchone()[0]
+    if latest_user:
+        enqueue_job("extract_memory", {
+            "conversation_id": state.conversation_id,
+            "message_id": latest_user["id"],
+            "user_text": state.user_query
+        })
+    if message_count >= 20 and message_count % 10 == 0:
+        enqueue_job("summarize", {"conversation_id": state.conversation_id})
     return {"answer": answer, "status": state.status.value}
 
 
