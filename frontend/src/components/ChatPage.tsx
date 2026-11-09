@@ -54,11 +54,19 @@ export default function ChatPage({conversationId,messages,onMessages,onRefresh}:
         return;
       }
       if (result.answer) {
-        const assistantMessage: Message = {
-          id: Date.now(), role: "assistant", content: result.answer,
-          created_at: new Date().toISOString()
-        };
-        onMessages([...messages, assistantMessage]);
+        const updatedMessages = [...messages];
+        const lastAssistantIndex = updatedMessages.map(m => m.role).lastIndexOf("assistant");
+        if (lastAssistantIndex >= 0) {
+          updatedMessages[lastAssistantIndex] = {
+            ...updatedMessages[lastAssistantIndex], content: result.answer
+          };
+          onMessages(updatedMessages);
+        } else {
+          onMessages([...updatedMessages, {
+            id: Date.now(), role: "assistant", content: result.answer,
+            created_at: new Date().toISOString()
+          }]);
+        }
       }
       setApproval(null);
       setToolStatus("");
@@ -100,7 +108,8 @@ export default function ChatPage({conversationId,messages,onMessages,onRefresh}:
         {toolStatus && <div className="mt-3 ml-11 text-xs text-muted">{toolStatus}</div>}
         {approval && <div className="mt-4 ml-11 max-w-[560px] rounded-xl border border-amber-300 bg-amber-50 p-4">
           <div className="text-sm font-semibold text-amber-900">Approval required</div>
-          <p className="mt-1 text-xs leading-5 text-amber-800">Nexora wants to run <strong>{approval.tool_name}</strong>. Review the action before allowing it to continue.</p>
+          <p className="mt-1 text-xs leading-5 text-amber-800">Nexora wants to run <strong>{approval.tool_name}</strong>. Review the action details before allowing it to continue.</p>
+          {approval.arguments && <pre className="mt-2 max-h-36 overflow-auto rounded-lg bg-white/70 p-2 text-[11px] text-amber-950">{JSON.stringify(approval.arguments, null, 2)}</pre>}
           <button onClick={approvePendingTool} disabled={busy} className="mt-3 rounded-lg bg-[#344C73] px-4 py-2 text-xs font-semibold text-white disabled:opacity-50">
             {busy ? "Continuing…" : "Approve and continue"}
           </button>
