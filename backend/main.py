@@ -286,7 +286,8 @@ def approve_chat_agent_step(run_id: str, payload: dict):
         return {"approval_required": {
             "run_id": run_id,
             "step_id": step.get("step_id"),
-            "tool_name": step.get("tool_name")
+            "tool_name": step.get("tool_name"),
+            "arguments": step.get("arguments", {})
         }}
 
     if state.status == RunStatus.FAILED:
