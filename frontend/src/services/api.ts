@@ -35,6 +35,7 @@ export interface ApprovalRequest {
   run_id: string;
   step_id: number;
   tool_name: string;
+  arguments?: Record<string, unknown>;
 }
 
 export async function approveChatTool(runId: string, stepId: number): Promise<{answer?: string; status?: string; approval_required?: ApprovalRequest}> {
