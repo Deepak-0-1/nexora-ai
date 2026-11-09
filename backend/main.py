@@ -138,7 +138,7 @@ def _compose_agent_response(conversation_id: str, user_text: str, state) -> str:
 
     messages = build_messages(conversation_id, user_text)
     messages[0]["content"] += (
-        "\\n\\nTOOL USE POLICY:\\n"
+        "\n\nTOOL USE POLICY:\n"
         "Use the tool results below as the source of truth. Do not claim an action "
         "succeeded unless its result says it succeeded. If a result is incomplete, "
         "state the limitation. Never invent missing values. Give a concise answer."
@@ -146,7 +146,7 @@ def _compose_agent_response(conversation_id: str, user_text: str, state) -> str:
     messages.append({
         "role": "user",
         "content": "The following are results from tools you executed for my request. "
-                   "Explain the outcome and answer my request using these results:\\n"
+                   "Explain the outcome and answer my request using these results:\n"
                    + json.dumps(tool_outputs, ensure_ascii=False, default=str)[:24000]
     })
     return chat_once(messages, temperature=float(runtime_settings()["temperature"]), num_predict=900)
@@ -192,8 +192,8 @@ def chat_stream(body: ChatRequest):
             if state.status == RunStatus.FAILED:
                 answer = "I couldn't safely plan the requested tool actions: " + (state.error or "Unknown planning error")
                 _save_assistant_message(body.conversation_id, answer)
-                yield "data: " + json.dumps({"token": answer}, ensure_ascii=False) + "\\n\\n"
-                yield "data: " + json.dumps({"done": True}) + "\\n\\n"
+                yield "data: " + json.dumps({"token": answer}, ensure_ascii=False) + "\n\n"
+                yield "data: " + json.dumps({"done": True}) + "\n\n"
                 return
 
             if state.plan and state.plan.steps:
@@ -208,22 +208,23 @@ def chat_stream(body: ChatRequest):
                             "tool_status": "started",
                             "tool_name": step.get("tool_name"),
                             "description": step.get("description")
-                        }, ensure_ascii=False) + "\\n\\n"
+                        }, ensure_ascii=False) + "\n\n"
                     elif event_type == "step_completed":
                         step = event.get("step", {})
                         yield "data: " + json.dumps({
                             "tool_status": "completed",
                             "tool_name": step.get("tool_name")
-                        }, ensure_ascii=False) + "\\n\\n"
+                        }, ensure_ascii=False) + "\n\n"
                     elif event_type == "waiting_approval":
                         step = event.get("step", {})
                         yield "data: " + json.dumps({
                             "approval_required": {
                                 "run_id": state.run_id,
                                 "step_id": step.get("step_id"),
-                                "tool_name": step.get("tool_name")
+                                "tool_name": step.get("tool_name"),
+                                "arguments": step.get("arguments", {})
                             }
-                        }, ensure_ascii=False) + "\\n\\n"
+                        }, ensure_ascii=False) + "\n\n"
                         return
 
                 if state.status == RunStatus.FAILED:
@@ -231,13 +232,13 @@ def chat_stream(body: ChatRequest):
                 else:
                     answer = _compose_agent_response(body.conversation_id, user_text, state)
                 _save_assistant_message(body.conversation_id, answer)
-                yield "data: " + json.dumps({"token": answer}, ensure_ascii=False) + "\\n\\n"
+                yield "data: " + json.dumps({"token": answer}, ensure_ascii=False) + "\n\n"
             else:
                 # No tool route matched. Keep the normal conversational path.
                 messages = build_messages(body.conversation_id, user_text)
                 for token in stream_chat(messages, temperature=float(runtime_settings()["temperature"])):
                     chunks.append(token)
-                    yield "data: " + json.dumps({"token": token}, ensure_ascii=False) + "\\n\\n"
+                    yield "data: " + json.dumps({"token": token}, ensure_ascii=False) + "\n\n"
                 answer = "".join(chunks).strip()
                 _save_assistant_message(body.conversation_id, answer)
 
@@ -253,10 +254,10 @@ def chat_stream(body: ChatRequest):
             })
             if message_count >= 20 and message_count % 10 == 0:
                 enqueue_job("summarize", {"conversation_id": body.conversation_id})
-            yield "data: " + json.dumps({"done": True}) + "\\n\\n"
+            yield "data: " + json.dumps({"done": True}) + "\n\n"
         except Exception as exc:
             logger.exception("Chat request failed")
-            yield "data: " + json.dumps({"error": str(exc)}, ensure_ascii=False) + "\\n\\n"
+            yield "data: " + json.dumps({"error": str(exc)}, ensure_ascii=False) + "\n\n"
 
     return StreamingResponse(
         generate(), media_type="text/event-stream",
